@@ -457,3 +457,7 @@ Before implementation APIs stabilize, please treat all examples and names in thi
 ---
 
 *Solia — rethink how applications are described, compiled, executed, and distributed.*
+
+## License
+
+This project is licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). See [LICENSE](LICENSE).
