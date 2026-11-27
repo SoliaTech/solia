@@ -77,7 +77,7 @@ fn loader_rejects_incompatible_and_truncated_artifacts() {
         assert!(host::Host::load(&bytes[..size]).is_err());
     }
     let mut newer = bytes;
-    newer[4] = 3;
+    newer[4] = 4;
     assert!(
         host::Host::load(&newer)
             .err()
@@ -323,4 +323,126 @@ fn narrow_row_wraps_and_painting_keeps_out_of_range_state() {
         );
     }
     pos(&paint(120., vec![]), "false/false/150");
+}
+
+const STAR: &str = include_str!("../examples/star-map.solia");
+
+#[test]
+fn scene_bounds_and_capability_are_checked_in_source_and_packages() {
+    let bytes = package_for(STAR);
+    assert_eq!(bytes[4], 3);
+    let (view, wasm) = package::decode(&bytes).unwrap();
+    assert_eq!(view.config.tasks.len(), 1);
+    assert!(host::Host::load(&bytes).is_ok());
+    for (from, to) in [
+        ("capabilities { ai.infer }", ""),
+        ("radius: 6", "radius: -1"),
+        ("width: 320", "width: 4097"),
+        ("-> star_y", "-> star_x"),
+        ("run suggest", "run other"),
+    ] {
+        assert!(check_source(&STAR.replace(from, to)).is_err(), "{to}");
+    }
+    let mut manifest = serde_json::to_value(&view).unwrap();
+    manifest["ai_infer"] = false.into();
+    let manifest = serde_json::to_vec(&manifest).unwrap();
+    let mut artifact = bytes[..8].to_vec();
+    artifact.extend((manifest.len() as u32).to_le_bytes());
+    artifact.extend(manifest);
+    artifact.extend(wasm);
+    assert!(package::decode(&artifact).is_err());
+    let mut downgrade = bytes;
+    downgrade[4] = 2;
+    assert!(package::decode(&downgrade).is_err());
+}
+
+#[test]
+fn task_outputs_require_complete_unique_typed_values() {
+    let fields = vec![
+        model::Field {
+            name: "x".into(),
+            slot: 2,
+            range: Some((8, 312)),
+        },
+        model::Field {
+            name: "ok".into(),
+            slot: 3,
+            range: None,
+        },
+    ];
+    assert_eq!(
+        ai::validate(r#"{"ok":true,"x":200}"#, &fields).unwrap(),
+        vec![(2, 200), (3, 1)]
+    );
+    for bad in [
+        r#"{"ok":1,"x":200}"#,
+        r#"{"ok":false,"ok":true,"x":200}"#,
+        r#"{"x":100}"#,
+        r#"{"ok":true,"x":313}"#,
+        r#"{"ok":true,"x":1.5}"#,
+        r#"{"ok":true,"x":200,"z":1}"#,
+    ] {
+        assert!(ai::validate(bad, &fields).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn scene_scales_geometry_and_clips_to_the_canvas() {
+    use eframe::egui;
+    let mut app = host::Host::load(&package_for(STAR)).unwrap();
+    let ctx = egui::Context::default();
+    for width in [600., 200.] {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 600.),
+                )),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        let circles: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle)
+                    if circle.fill == egui::Color32::from_rgb(88, 166, 255)
+                        || circle.fill == egui::Color32::from_rgb(255, 179, 92) =>
+                {
+                    Some((circle, shape.clip_rect))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 2);
+        let (base, clip) = circles[0];
+        assert_eq!(clip, circles[1].1);
+        let scale = clip.width() / 320.;
+        assert!((base.radius - 6. * scale).abs() < 0.01);
+        assert!((circles[1].0.center.x - base.center.x - 160. * scale).abs() < 0.01);
+        assert!((clip.height() - 180. * scale).abs() < 0.01);
+    }
+}
+
+#[test]
+#[ignore = "requires a configured Bifrost model and virtual key"]
+fn configured_bifrost_star_task() {
+    let p = parser::compile(STAR).unwrap();
+    let host = host::Host::load(&package_for(STAR)).unwrap();
+    let task = &p.view.config.tasks[0];
+    let job = ai::start(
+        &ai::Settings::load().unwrap(),
+        host.label(&task.prompt),
+        task.fields.clone(),
+        Default::default(),
+    )
+    .unwrap();
+    let writes = job
+        .result
+        .recv_timeout(std::time::Duration::from_secs(35))
+        .unwrap()
+        .unwrap();
+    assert_eq!(writes.len(), 2);
 }

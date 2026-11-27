@@ -1,4 +1,4 @@
-use crate::{model::*, package};
+use crate::{ai, model::*, package};
 use eframe::egui;
 use wasmi::{
     Config, Engine, Global, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
@@ -9,10 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 enum Event {
     Click(usize),
+    Ask(usize),
     Write(usize, i32),
 }
 
+struct Pending {
+    task: usize,
+    prompt: String,
+    snapshot: Vec<(usize, i32)>,
+    job: Option<ai::Job>,
+}
+
 pub struct Host {
+    pending: Option<Pending>,
+    provider: ai::Settings,
+    origin: String,
+    status: String,
     id: u64,
     pub(crate) view: View,
     store: Store<StoreLimits>,
@@ -59,11 +71,28 @@ impl Host {
             }
         }
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        for field in view.config.tasks.iter().flat_map(|t| &t.fields) {
+            if !globals[field.slot].ty(&store).mutability().is_mut() {
+                return Err("immutable AI output slot".into());
+            }
+        }
         let handlers = (0..view.config.handlers)
             .map(|i| instance.get_typed_func(&store, &format!("click_{i}")))
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
+        let (provider, status) = if view.config.ai_infer {
+            match ai::Settings::load() {
+                Ok(s) => (s, String::new()),
+                Err(e) => (Default::default(), e),
+            }
+        } else {
+            (Default::default(), String::new())
+        };
         Ok(Self {
+            provider,
+            status,
+            origin: "Local application".into(),
+            pending: None,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             view,
             store,
@@ -76,9 +105,11 @@ impl Host {
     pub fn click(&mut self, index: usize) -> Result<(), String> {
         let handler = self.handlers.get(index).ok_or("unknown button")?;
         self.store.set_fuel(1_000_000).map_err(|e| e.to_string())?;
-        handler
+        let result = handler
             .call(&mut self.store, ())
-            .map_err(|e| format!("button handler failed: {e}"))
+            .map_err(|e| format!("button handler failed: {e}"));
+        self.discard_changed();
+        result
     }
 
     pub(crate) fn label(&self, parts: &[Part]) -> String {
@@ -103,6 +134,50 @@ impl Host {
 }
 
 impl Host {
+    pub fn set_source(&mut self, origin: String) {
+        self.origin = origin;
+    }
+
+    fn ask(&mut self, index: usize) {
+        if self.pending.is_some() {
+            return;
+        }
+        let task = &self.view.config.tasks[index];
+        let prompt = self.label(&task.prompt);
+        if prompt.len() > 4096 {
+            self.status = "Expanded prompt exceeds 4 KiB".into();
+            return;
+        }
+        let slots: std::collections::BTreeSet<_> = task
+            .prompt
+            .iter()
+            .filter_map(|p| {
+                if let Part::State(i) = p {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .chain(task.fields.iter().map(|f| f.slot))
+            .collect();
+        let snapshot = slots.into_iter().map(|i| (i, self.state(i))).collect();
+        self.pending = Some(Pending {
+            task: index,
+            prompt,
+            snapshot,
+            job: None,
+        });
+    }
+    fn discard_changed(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.snapshot.iter().any(|(i, n)| self.state(*i) != *n))
+        {
+            self.pending = None;
+            self.status = "State changed. Request a new suggestion.".into();
+        }
+    }
     pub fn title(&self) -> &str {
         &self.view.config.title
     }
@@ -136,6 +211,55 @@ impl Host {
                     ui.vertical(children);
                 }
                 return *end;
+            }
+            Widget::Scene {
+                label,
+                width,
+                height,
+                background,
+                shapes,
+            } => {
+                let scale = (ui.available_width().max(0.) / f32::from(*width)).min(1.);
+                let size = egui::vec2(f32::from(*width), f32::from(*height)) * scale;
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.ctx().accesskit_node_builder(response.id, |n| {
+                    n.set_role(egui::accesskit::Role::Image);
+                    n.set_label(self.label(label));
+                });
+                let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+                let color = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
+                painter.rect_filled(rect, 0., color(*background));
+                let val = |v| {
+                    (match v {
+                        Value::State(i) => self.state(i),
+                        Value::Literal(n) => n,
+                    }) as f32
+                        * scale
+                };
+                for shape in shapes {
+                    let pos = rect.min + egui::vec2(val(shape.x), val(shape.y));
+                    match shape.geometry {
+                        Geometry::Rect(w, h) if val(w) > 0. && val(h) > 0. => {
+                            painter.rect_filled(
+                                egui::Rect::from_min_size(pos, egui::vec2(val(w), val(h))),
+                                0.,
+                                color(shape.fill),
+                            );
+                        }
+                        Geometry::Circle(r) if val(r) > 0. => {
+                            painter.circle_filled(pos, val(r), color(shape.fill));
+                        }
+                        _ => (),
+                    }
+                }
+            }
+            Widget::Run { label, task } => {
+                if ui
+                    .add_enabled(self.pending.is_none(), egui::Button::new(self.label(label)))
+                    .clicked()
+                {
+                    events.push(Event::Ask(*task));
+                }
             }
             Widget::Heading(parts) => {
                 let response = ui.heading(self.label(parts));
@@ -198,11 +322,16 @@ impl Host {
             ui.push_id(self.id, |ui| self.draw(ui, 0, &mut events));
             for event in events {
                 let result = match event {
+                    Event::Ask(task) => {
+                        self.ask(task);
+                        Ok(())
+                    }
                     Event::Click(handler) => self.click(handler),
                     Event::Write(slot, value) => self.globals[slot]
                         .set(&mut self.store, wasmi::Val::I32(value))
                         .map_err(|e| e.to_string()),
                 };
+                self.discard_changed();
                 ui.ctx().request_repaint();
                 if let Err(error) = result {
                     self.error = Some(error);
@@ -210,6 +339,106 @@ impl Host {
                 }
             }
         });
+        self.inference_ui(ui);
+    }
+
+    fn inference_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.view.config.ai_infer {
+            return;
+        }
+        let mut cancel = false;
+        let mut completed = None;
+        if let Some(p) = &mut self.pending {
+            egui::Window::new("Solia · AI request")
+                .id(egui::Id::new(("ai", self.id)))
+                .collapsible(false)
+                .resizable(true)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("Source: {}", self.origin));
+                    if let Some(job) = &p.job {
+                        match job.result.try_recv() {
+                            Ok(result) => completed = Some(result),
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                completed = Some(Err("Inference worker stopped".into()))
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                ui.spinner();
+                                ui.label("Waiting for Bifrost…");
+                            }
+                        }
+                    } else {
+                        ui.label("Bifrost base URL");
+                        ui.text_edit_singleline(&mut self.provider.base_url);
+                        ui.label("Model");
+                        ui.text_edit_singleline(&mut self.provider.model);
+                        ui.label("Virtual key (this instance)");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.provider.session_key)
+                                .password(true)
+                                .hint_text(format!("Uses {} when empty", self.provider.key_env)),
+                        );
+                        ui.label("Prompt");
+                        ui.label(&p.prompt);
+                        ui.label(format!(
+                            "Requested fields: {}",
+                            self.view.config.tasks[p.task]
+                                .fields
+                                .iter()
+                                .map(|f| f.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        if ui.button("Allow once").clicked() {
+                            match ai::start(
+                                &self.provider,
+                                p.prompt.clone(),
+                                self.view.config.tasks[p.task].fields.clone(),
+                                ui.ctx().clone(),
+                            ) {
+                                Ok(job) => {
+                                    p.job = Some(job);
+                                    self.status.clear();
+                                }
+                                Err(e) => self.status = e,
+                            }
+                        }
+                    }
+                    cancel = ui.button("Cancel").clicked();
+                    if !self.status.is_empty() {
+                        ui.label(&self.status);
+                    }
+                });
+        }
+        if cancel {
+            self.pending = None;
+            self.status = "AI request cancelled".into();
+        } else if let Some(result) = completed {
+            self.pending = None;
+            self.status = match result.and_then(|writes| {
+                // Slots were validated as mutable i32 globals before instantiation.
+                for (slot, value) in writes {
+                    self.globals[slot]
+                        .set(&mut self.store, wasmi::Val::I32(value))
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }) {
+                Ok(()) => "AI suggestion applied".into(),
+                Err(e) => e,
+            };
+            ui.ctx().request_repaint();
+        }
+        if self.pending.is_none() && !self.status.is_empty() {
+            egui::Window::new("Solia · AI status")
+                .id(egui::Id::new(("ai-status", self.id)))
+                .collapsible(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(&self.status);
+                    if ui.button("Dismiss").clicked() {
+                        self.status.clear();
+                    }
+                });
+        }
     }
 }
 
@@ -240,3 +469,7 @@ pub fn run(host: Host) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+#[path = "host_ai_tests.rs"]
+mod ai_tests;

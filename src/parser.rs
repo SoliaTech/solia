@@ -78,7 +78,7 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 Kind::Number(digits)
             }
-            c if "{}():,=+-".contains(c) => Kind::Symbol(c),
+            c if "{}():,=+-.>".contains(c) => Kind::Symbol(c),
             _ => return Err(format!("{line}:{start}: unexpected character {c:?}")),
         };
         tokens.push(Token {
@@ -98,6 +98,8 @@ fn lex(src: &str) -> Result<Vec<Token>, String> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    tasks: Vec<Task>,
+    shapes: usize,
     slots: HashMap<String, usize>,
     states: Vec<State>,
 }
@@ -108,6 +110,8 @@ pub fn compile(src: &str) -> Result<Program> {
     Parser {
         tokens: lex(src)?,
         pos: 0,
+        tasks: vec![],
+        shapes: 0,
         slots: HashMap::new(),
         states: vec![],
     }
@@ -295,13 +299,158 @@ impl Parser {
         Ok(slot)
     }
 
+    fn color(&mut self) -> Result<[u8; 3]> {
+        let error = self.error("expected #RRGGBB color");
+        let raw = self.string()?;
+        if raw.len() != 7
+            || !raw.starts_with('#')
+            || !raw[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(error);
+        }
+        Ok([1, 3, 5].map(|i| u8::from_str_radix(&raw[i..i + 2], 16).unwrap()))
+    }
+    fn geometry_value(&mut self, size: bool) -> Result<Value> {
+        if let Kind::Word(name) = self.peek() {
+            let slot = self.slot(name)?;
+            if self.states[slot].ty != Type::I32 {
+                return Err(self.error("geometry requires i32"));
+            }
+            self.pos += 1;
+            Ok(Value::State(slot))
+        } else {
+            let value = self.number()?;
+            if size && value < 0 {
+                return Err(self.error("negative shape size"));
+            }
+            Ok(Value::Literal(value))
+        }
+    }
+    fn scene(&mut self, label: Vec<Part>, nodes: usize) -> Result<Widget> {
+        self.parameter("width")?;
+        let width = self.size(1)?;
+        self.parameter("height")?;
+        let height = self.size(1)?;
+        if width > 4096 || height > 4096 {
+            return Err(self.error("scene dimensions exceed 4096"));
+        }
+        self.parameter("background")?;
+        let background = self.color()?;
+        self.sym(')')?;
+        self.sym('{')?;
+        let mut shapes = vec![];
+        while !self.take(&Kind::Symbol('}')) {
+            if shapes.len() >= 1024 || nodes + 1 + self.shapes >= MAX_NODES {
+                return Err(self.error("scene or view node limit exceeded"));
+            }
+            let kind = self.word()?;
+            self.sym('(')?;
+            self.keyword("x")?;
+            self.sym(':')?;
+            let x = self.geometry_value(false)?;
+            self.parameter("y")?;
+            let y = self.geometry_value(false)?;
+            let geometry = match kind.as_str() {
+                "Rect" => {
+                    self.parameter("width")?;
+                    let w = self.geometry_value(true)?;
+                    self.parameter("height")?;
+                    Geometry::Rect(w, self.geometry_value(true)?)
+                }
+                "Circle" => {
+                    self.parameter("radius")?;
+                    Geometry::Circle(self.geometry_value(true)?)
+                }
+                _ => return Err(self.error("expected Rect or Circle")),
+            };
+            self.parameter("fill")?;
+            let fill = self.color()?;
+            self.sym(')')?;
+            shapes.push(Shape {
+                x,
+                y,
+                geometry,
+                fill,
+            });
+            self.shapes += 1;
+        }
+        Ok(Widget::Scene {
+            label,
+            width,
+            height,
+            background,
+            shapes,
+        })
+    }
+    fn task(&mut self) -> Result<()> {
+        let name = self.word()?;
+        if self.tasks.iter().any(|t| t.name == name) {
+            return Err(self.error("duplicate task"));
+        }
+        self.sym('{')?;
+        self.keyword("prompt")?;
+        self.sym(':')?;
+        let prompt = self.label()?;
+        self.keyword("output")?;
+        self.sym('{')?;
+        let mut fields: Vec<Field> = vec![];
+        while !self.take(&Kind::Symbol('}')) {
+            if fields.len() == 16 {
+                return Err(self.error("at most 16 output fields"));
+            }
+            let field = self.word()?;
+            self.sym(':')?;
+            let range = match self.word()?.as_str() {
+                "bool" => None,
+                "i32" => {
+                    self.sym('(')?;
+                    self.keyword("min")?;
+                    self.sym(':')?;
+                    let min = self.number()?;
+                    self.parameter("max")?;
+                    let max = self.number()?;
+                    self.sym(')')?;
+                    if min > max {
+                        return Err(self.error("invalid output range"));
+                    }
+                    Some((min, max))
+                }
+                _ => return Err(self.error("expected bool or bounded i32")),
+            };
+            self.sym('-')?;
+            self.sym('>')?;
+            let target = self.word()?;
+            let slot = self.slot(&target)?;
+            if (self.states[slot].ty == Type::I32) != range.is_some()
+                || fields.iter().any(|f| f.name == field || f.slot == slot)
+            {
+                return Err(self.error("invalid or duplicate output binding"));
+            }
+            fields.push(Field {
+                name: field,
+                slot,
+                range,
+            });
+        }
+        if fields.is_empty() {
+            return Err(self.error("task needs an output field"));
+        }
+        self.sym('}')?;
+        self.tasks.push(Task {
+            name,
+            prompt,
+            fields,
+        });
+        Ok(())
+    }
+
     fn widget(
         &mut self,
         depth: usize,
         nodes: &mut Vec<Widget>,
         handlers: &mut Vec<Vec<Assignment>>,
     ) -> Result<()> {
-        if depth > MAX_DEPTH || nodes.len() >= MAX_NODES {
+        if depth > MAX_DEPTH || nodes.len() + self.shapes >= MAX_NODES {
             return Err(self.error("view exceeds depth 32 or 4096 nodes"));
         }
         let name = self.word()?;
@@ -340,6 +489,11 @@ impl Parser {
         let widget = match name.as_str() {
             "Text" => Widget::Text(label),
             "Heading" => Widget::Heading(label),
+            "Scene2D" => {
+                let scene = self.scene(label, nodes.len())?;
+                nodes.push(scene);
+                return Ok(());
+            }
             "Checkbox" => Widget::Checkbox {
                 label,
                 slot: self.binding("checked", Type::Bool)?,
@@ -363,6 +517,23 @@ impl Parser {
             "Button" => {
                 self.sym(')')?;
                 self.sym('{')?;
+                if self.peek() == &Kind::Word("run".into())
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(Kind::Word(_))
+                    )
+                {
+                    self.pos += 1;
+                    let name = self.word()?;
+                    let task = self
+                        .tasks
+                        .iter()
+                        .position(|t| t.name == name)
+                        .ok_or_else(|| self.error("unknown AI task"))?;
+                    self.sym('}')?;
+                    nodes.push(Widget::Run { label, task });
+                    return Ok(());
+                }
                 let mut body = vec![];
                 while !self.take(&Kind::Symbol('}')) {
                     body.push(self.assignment()?);
@@ -414,11 +585,25 @@ impl Parser {
                 }
             }
         }
+        let ai_infer = self.take(&Kind::Word("capabilities".into()));
+        if ai_infer {
+            self.sym('{')?;
+            self.keyword("ai")?;
+            self.sym('.')?;
+            self.keyword("infer")?;
+            self.sym('}')?;
+        }
         if self.take(&Kind::Word("state".into())) {
             self.sym('{')?;
             while !self.take(&Kind::Symbol('}')) {
                 self.state()?;
             }
+        }
+        while self.take(&Kind::Word("task".into())) {
+            if !ai_infer {
+                return Err(self.error("task requires ai.infer capability"));
+            }
+            self.task()?;
         }
         self.keyword("view")?;
         self.sym('{')?;
@@ -433,6 +618,8 @@ impl Parser {
         let view = View {
             nodes,
             config: Config {
+                ai_infer,
+                tasks: self.tasks,
                 title,
                 window,
                 dark,

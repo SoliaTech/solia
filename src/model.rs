@@ -12,7 +12,7 @@ pub struct State {
     pub initial: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Value {
     Literal(i32),
     State(usize),
@@ -39,7 +39,7 @@ pub struct Program {
     pub handlers: Vec<Vec<Assignment>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Part {
     Text(String),
     State(usize),
@@ -47,6 +47,17 @@ pub enum Part {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Widget {
+    Scene {
+        label: Vec<Part>,
+        width: u16,
+        height: u16,
+        background: [u8; 3],
+        shapes: Vec<Shape>,
+    },
+    Run {
+        label: Vec<Part>,
+        task: usize,
+    },
     Column {
         gap: u16,
         end: usize,
@@ -74,6 +85,34 @@ pub enum Widget {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Geometry {
+    Rect(Value, Value),
+    Circle(Value),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Shape {
+    pub x: Value,
+    pub y: Value,
+    pub fill: [u8; 3],
+    pub geometry: Geometry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Field {
+    pub name: String,
+    pub slot: usize,
+    pub range: Option<(i32, i32)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Task {
+    pub name: String,
+    pub prompt: Vec<Part>,
+    pub fields: Vec<Field>,
+}
+
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_NODES: usize = 4096;
 
@@ -88,6 +127,10 @@ pub struct View {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai_infer: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Task>,
     pub title: String,
     pub window: [u16; 2],
     pub dark: bool,

@@ -1,0 +1,32 @@
+app StarMap {
+    capabilities { ai.infer }
+
+    state {
+        base_x = 80
+        base_y = 90
+        star_x = 240
+        star_y = 90
+    }
+
+    task suggest {
+        prompt: "在 320×180 的星图上选一个远离基地 ({base_x}, {base_y}) 的观测点。"
+        output {
+            x: i32(min: 8, max: 312) -> star_x
+            y: i32(min: 8, max: 172) -> star_y
+        }
+    }
+
+    view {
+        Column(gap: 12) {
+            Scene2D("Star map", width: 320, height: 180, background: "#101828") {
+                Rect(x: 8, y: 8, width: 304, height: 164, fill: "#20304A")
+                Circle(x: base_x, y: base_y, radius: 6, fill: "#58A6FF")
+                Circle(x: star_x, y: star_y, radius: 8, fill: "#FFB35C")
+            }
+            Slider("Base X", value: base_x, min: 8, max: 312)
+            Slider("Base Y", value: base_y, min: 8, max: 172)
+            Button("Suggest a star") { run suggest }
+            Text("Base ({base_x}, {base_y}) / Star ({star_x}, {star_y})")
+        }
+    }
+}

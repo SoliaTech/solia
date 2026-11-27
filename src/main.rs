@@ -61,7 +61,9 @@ fn cli(args: &[String]) -> Result<(), String> {
             } else {
                 source(path, compile_source)?
             };
-            run(AppInstance::load(&bytes)?)
+            let mut app = AppInstance::load(&bytes)?;
+            app.set_source(path.display().to_string());
+            run(app)
         }
         _ => Err(HELP.into()),
     }

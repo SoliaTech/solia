@@ -61,6 +61,7 @@ pub fn build(program: &Program) -> Result<Vec<u8>, String> {
     let wasm = wat::parse_str(module).map_err(|e| e.to_string())?;
     let view = &program.view;
     let (version, manifest) = match view.nodes.split_first() {
+        _ if needs_v3(view) => (3u32, serde_json::to_vec(view)),
         Some((Widget::Column { gap, .. }, children)) if legacy(children) => (
             1u32,
             serde_json::to_vec(&LegacyOutput {
@@ -88,9 +89,9 @@ pub fn decode(bytes: &[u8]) -> Result<(View, &[u8]), String> {
         return Err("invalid SAPP header or size".into());
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         return Err(format!(
-            "unsupported SAPP version {version} (expected 1 or 2)"
+            "unsupported SAPP version {version} (expected 1, 2 or 3)"
         ));
     }
     let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
@@ -116,10 +117,26 @@ pub fn decode(bytes: &[u8]) -> Result<(View, &[u8]), String> {
         }
         _ => serde_json::from_slice(manifest).map_err(|e| format!("invalid manifest: {e}"))?,
     };
+    if version < 3 && needs_v3(&view) {
+        return Err("v3 features in older package".into());
+    }
     validate_view(&view)?;
     Ok((view, wasm))
 }
 
+fn needs_v3(view: &View) -> bool {
+    view.config.ai_infer
+        || !view.config.tasks.is_empty()
+        || view
+            .nodes
+            .iter()
+            .any(|w| matches!(w, Widget::Scene { .. } | Widget::Run { .. }))
+}
+fn labels_valid(parts: &[Part], types: &[Type]) -> bool {
+    parts
+        .iter()
+        .all(|p| !matches!(p,Part::State(i) if *i>=types.len()))
+}
 fn validate_view(view: &View) -> Result<(), String> {
     let config = &view.config;
     if config.window.iter().any(|n| !(1..=8192).contains(n)) {
@@ -129,6 +146,33 @@ fn validate_view(view: &View) -> Result<(), String> {
     {
         return Err("invalid root layout".into());
     }
+    let mut names = std::collections::HashSet::new();
+    for task in &config.tasks {
+        if !config.ai_infer
+            || !names.insert(&task.name)
+            || !labels_valid(&task.prompt, &config.types)
+            || !(1..=16).contains(&task.fields.len())
+        {
+            return Err("invalid AI task declaration".into());
+        }
+        let mut slots = std::collections::HashSet::new();
+        let mut fields = std::collections::HashSet::new();
+        for f in &task.fields {
+            let expected = if f.range.is_some() {
+                Type::I32
+            } else {
+                Type::Bool
+            };
+            if !slots.insert(f.slot)
+                || !fields.insert(&f.name)
+                || config.types.get(f.slot) != Some(&expected)
+                || f.range.is_some_and(|(a, b)| a > b)
+            {
+                return Err("invalid task output binding".into());
+            }
+        }
+    }
+    let mut total = view.nodes.len();
     let mut ends = Vec::new();
     let mut buttons = 0;
     for (i, widget) in view.nodes.iter().enumerate() {
@@ -148,6 +192,44 @@ fn validate_view(view: &View) -> Result<(), String> {
                 }
                 ends.push(*end);
                 continue;
+            }
+            Widget::Run { label, task } => {
+                if *task >= config.tasks.len() {
+                    return Err("invalid task reference".into());
+                }
+                label
+            }
+            Widget::Scene {
+                label,
+                width,
+                height,
+                shapes,
+                ..
+            } => {
+                total += shapes.len();
+                if !(1..=4096).contains(width)
+                    || !(1..=4096).contains(height)
+                    || shapes.len() > 1024
+                    || total > MAX_NODES
+                {
+                    return Err("invalid scene size".into());
+                }
+                let valid = |v: Value, size: bool| match v {
+                    Value::State(i) => config.types.get(i) == Some(&Type::I32),
+                    Value::Literal(n) => !size || n >= 0,
+                };
+                for shape in shapes {
+                    if !valid(shape.x, false)
+                        || !valid(shape.y, false)
+                        || !match shape.geometry {
+                            Geometry::Rect(w, h) => valid(w, true) && valid(h, true),
+                            Geometry::Circle(r) => valid(r, true),
+                        }
+                    {
+                        return Err("invalid scene geometry".into());
+                    }
+                }
+                label
             }
             Widget::Divider => continue,
             Widget::Text(label) | Widget::Heading(label) => label,

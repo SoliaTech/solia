@@ -4,7 +4,7 @@
 
 Solia is an early-stage language and platform concept. Its goal is to make an application—not a web page—the primary unit of development. A Solia application can describe its data, state, user interface, application logic, asynchronous work, AI capabilities, and interactive scenes in one coherent language and run inside a cross-platform native host.
 
-> **Project status:** The Phase 1 desktop prototype runs the Counter example. The implemented subset and commands are described below. The wider language and platform sections describe the design roadmap.
+> **Project status:** The desktop prototype runs Counter, Settings and a 2D star map with optional AI inference. The implemented subset and commands are described below. The wider language and platform sections describe the design roadmap.
 
 ## Run the first MVP
 
@@ -20,20 +20,28 @@ The native window displays **Count: 0**. Activate **Increment** to run its compi
 
 ### Implemented syntax
 
-A file defines one `app Name` with an optional `config`, an optional `state`, and a required `view`, in that order. Whitespace separates tokens and `//` starts a line comment. Identifiers use ASCII letters, digits, and underscores and start with a letter or underscore.
+A file defines one `app Name` with optional `config`, `capabilities` and `state` blocks, zero or more `task` declarations, and a required `view`, in that order. Whitespace separates tokens and `//` starts a line comment. Identifiers use ASCII letters, digits, and underscores and start with a letter or underscore.
 
 - **Configuration.** Set `title` to a quoted string, `window` to a pair of integer dimensions (1–8192), and `theme` to `dark` or `light`. Defaults are the app name, 640 × 480, and light.
 - **State.** Declare `count: i32 = 0` or `ready = false`. The compiler infers omitted types from signed integer and boolean literals. It resolves names and checks assignments before emitting code.
 - **Views.** Nest `Column` and wrapping `Row` layouts. Use `Text`, `Heading`, `Divider()`, and `Button` for presentation and actions. Bind `Checkbox("Mute", checked: muted)` to a boolean and `Slider("Volume", value: volume, min: 0, max: 100)` to an integer. Labels support Unicode and `{stateName}` interpolation. [Settings example](examples/settings.solia)
 - **Handlers.** Use `=` for assignment and `+=` or `-=` for integer updates. The right-hand side is a literal or a state name of the same type. Statements execute in order. Integer arithmetic wraps at 32 bits.
 
+### 2D scenes and AI inference
+
+Run `cargo run --locked -- run examples/star-map.solia`. The base sliders update the scene immediately. **Suggest a star** opens a host-owned request window showing the source, prompt, output fields and destination. Review the request and select **Allow once**. A valid reply moves the orange star. Changing the base, cancelling or replacing the application discards pending work.
+
+Use `Scene2D` with a fixed logical size, a background and ordered `Rect` / `Circle` primitives. Geometry can reference integer state. The canvas scales down to the available width and clips its contents. AI-enabled applications declare `capabilities { ai.infer }`, define a prompt and typed output bindings, and run a task from a button. [Complete example](examples/star-map.solia)
+
+The CLI and Browser load the same host AI settings when an application opens. Reload the application after changing the configuration. The star-map task accepts two integer coordinates within the bounds declared in its output fields. [AI tasks and 2D scenes (中文)](docs/RFC-0003-ai-and-scene2d.md)
+
 ### Package and host
 
 The Rust frontend produces a typed program with resolved state slots, view bindings, and handlers. The backend emits a WebAssembly module with one exported i32 global per slot and one parameterless function per button. Boolean values use 0 and 1. The Rust host uses wasmi for execution and eframe for windowing, layout, semantic widgets, keyboard focus, and rendering.
 
-Both package versions contain the four bytes `SAPP`, a little-endian u32 version, a little-endian u32 manifest length, a UTF-8 JSON view manifest, and the WebAssembly bytes. A single column of text and buttons emits v1. Extended components emit v2 with a preorder node list, exclusive subtree ends, and typed state bindings. The host checks the version, container bounds, view references, input mutability, and export types before opening a window. Modules run with an empty import set and a per-click instruction budget.
+All three package versions contain the four bytes `SAPP`, a little-endian u32 version, a little-endian u32 manifest length, a UTF-8 JSON view manifest, and the WebAssembly bytes. A single column of text and buttons emits v1. Extended components emit v2 with a preorder node list, exclusive subtree ends, and typed state bindings. Scenes and AI tasks emit v3. The host checks the version, container bounds, view references, input mutability, and export types before opening a window. Modules run with an empty import set and a per-click instruction budget.
 
-This milestone covers the single-file Counter workflow. Modules, user-defined functions and types, editable text, async tasks, network permissions, and the formatter are future work.
+Modules, user-defined functions and types, editable text, general-purpose async tasks, application network permissions, and the formatter are future work.
 
 ## Vision
 

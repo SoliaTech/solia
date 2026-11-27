@@ -1,3 +1,4 @@
+mod ai;
 mod host;
 mod model;
 mod package;

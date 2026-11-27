@@ -12,3 +12,5 @@ serde_json = "1"
 wasmi = "0.40"
 wat = "1"
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
