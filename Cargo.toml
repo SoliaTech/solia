@@ -1,0 +1,13 @@
+[package]
+name = "solia"
+version = "0.1.0"
+edition = "2024"
+description = "Solia compiler and native desktop host"
+
+[dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "accesskit"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasmi = "0.40"
+wat = "1"
+tempfile = "3"

@@ -4,7 +4,36 @@
 
 Solia is an early-stage language and platform concept. Its goal is to make an application—not a web page—the primary unit of development. A Solia application can describe its data, state, user interface, application logic, asynchronous work, AI capabilities, and interactive scenes in one coherent language and run inside a cross-platform native host.
 
-> **Project status:** design stage. The syntax and semantics in this README are proposals, not a frozen language specification or implemented feature set.
+> **Project status:** The Phase 1 desktop prototype runs the Counter example. The implemented subset and commands are described below. The wider language and platform sections describe the design roadmap.
+
+## Run the first MVP
+
+From this repository with a current stable Rust toolchain and a graphical desktop:
+
+```sh
+cargo run -- check examples/counter.solia
+cargo run -- build examples/counter.solia target/counter.sapp
+cargo run -- run target/counter.sapp
+```
+
+The native window displays **Count: 0**. Activate **Increment** to run its compiled WebAssembly handler and see **Count: 1**. Each launch creates fresh application state. To run directly from source, use `cargo run -- run examples/counter.solia`. To exercise the compiler, package loader, and runtime without opening a window, use `cargo test --locked`.
+
+### Implemented syntax
+
+A file defines one `app Name` with an optional `config`, an optional `state`, and a required `view`, in that order. Whitespace separates tokens and `//` starts a line comment. Identifiers use ASCII letters, digits, and underscores and start with a letter or underscore.
+
+- **Configuration.** Set `title` to a quoted string, `window` to a pair of integer dimensions (1–8192), and `theme` to `dark` or `light`. Defaults are the app name, 640 × 480, and light.
+- **State.** Declare `count: i32 = 0` or `ready = false`. The compiler infers omitted types from signed integer and boolean literals. It resolves names and checks assignments before emitting code.
+- **Views.** Nest `Column` and wrapping `Row` layouts. Use `Text`, `Heading`, `Divider()`, and `Button` for presentation and actions. Bind `Checkbox("Mute", checked: muted)` to a boolean and `Slider("Volume", value: volume, min: 0, max: 100)` to an integer. Labels support Unicode and `{stateName}` interpolation. [Settings example](examples/settings.solia)
+- **Handlers.** Use `=` for assignment and `+=` or `-=` for integer updates. The right-hand side is a literal or a state name of the same type. Statements execute in order. Integer arithmetic wraps at 32 bits.
+
+### Package and host
+
+The Rust frontend produces a typed program with resolved state slots, view bindings, and handlers. The backend emits a WebAssembly module with one exported i32 global per slot and one parameterless function per button. Boolean values use 0 and 1. The Rust host uses wasmi for execution and eframe for windowing, layout, semantic widgets, keyboard focus, and rendering.
+
+Both package versions contain the four bytes `SAPP`, a little-endian u32 version, a little-endian u32 manifest length, a UTF-8 JSON view manifest, and the WebAssembly bytes. A single column of text and buttons emits v1. Extended components emit v2 with a preorder node list, exclusive subtree ends, and typed state bindings. The host checks the version, container bounds, view references, input mutability, and export types before opening a window. Modules run with an empty import set and a per-click instruction budget.
+
+This milestone covers the single-file Counter workflow. Modules, user-defined functions and types, editable text, async tasks, network permissions, and the formatter are future work.
 
 ## Vision
 
@@ -421,7 +450,7 @@ Solia is not intended to be:
 
 ## Contributing and project status
 
-Solia is currently a design-stage project. Early contributions should focus on design discussions, small prototypes, benchmarks, and RFCs. The language syntax, runtime ABI, package format, and implementation choices may change as prototypes reveal trade-offs.
+Solia has an initial desktop prototype. Early contributions can exercise the Counter workflow, extend the checked language subset, or explore the open design questions. The language syntax, runtime ABI, package format, and implementation choices may change as prototypes reveal trade-offs.
 
 Before implementation APIs stabilize, please treat all examples and names in this README as provisional.
 

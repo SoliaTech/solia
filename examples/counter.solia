@@ -1,0 +1,20 @@
+app Counter {
+    config {
+        title: "Counter"
+        window: (800, 600)
+        theme: dark
+    }
+
+    state {
+        count: i32 = 0
+    }
+
+    view {
+        Column(gap: 16) {
+            Text("Count: {count}")
+            Button("Increment") {
+                count += 1
+            }
+        }
+    }
+}
